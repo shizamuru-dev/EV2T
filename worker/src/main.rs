@@ -1,7 +1,7 @@
 use amqprs::{
+    BasicProperties, Deliver,
     channel::{BasicAckArguments, BasicConsumeArguments, BasicRejectArguments},
     consumer::AsyncConsumer,
-    BasicProperties, Deliver,
 };
 use shared::TranscriptionTask;
 use std::time::Duration;
@@ -34,7 +34,9 @@ impl AsyncConsumer for TranscriptionConsumer {
             Ok(json) => json,
             Err(e) => {
                 error!("Failed to parse payload: {}", e);
-                let _ = channel.basic_reject(BasicRejectArguments::new(delivery_tag, false)).await;
+                let _ = channel
+                    .basic_reject(BasicRejectArguments::new(delivery_tag, false))
+                    .await;
                 return;
             }
         };
@@ -43,7 +45,9 @@ impl AsyncConsumer for TranscriptionConsumer {
             Ok(t) => t,
             Err(e) => {
                 error!("Failed to deserialize task: {}", e);
-                let _ = channel.basic_reject(BasicRejectArguments::new(delivery_tag, false)).await;
+                let _ = channel
+                    .basic_reject(BasicRejectArguments::new(delivery_tag, false))
+                    .await;
                 return;
             }
         };
@@ -72,7 +76,7 @@ impl AsyncConsumer for TranscriptionConsumer {
         match ffmpeg_status {
             Ok(status) if status.success() => {
                 info!("Converted to WAV successfully.");
-                
+
                 info!("Running whisper.cpp on {}...", wav_path);
                 let whisper_status = Command::new("whisper-cli")
                     .arg("-m")
@@ -88,28 +92,44 @@ impl AsyncConsumer for TranscriptionConsumer {
                 match whisper_status {
                     Ok(status) if status.success() => {
                         let whisper_output_json = format!("{}.json", wav_path);
-                        
+
                         if let Ok(file_content) = fs::read_to_string(&whisper_output_json).await {
-                            if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&file_content) {
+                            if let Ok(parsed_json) =
+                                serde_json::from_str::<serde_json::Value>(&file_content)
+                            {
                                 let mut full_text = String::new();
-                                if let Some(transcription) = parsed_json.get("transcription").and_then(|t| t.as_array()) {
+                                if let Some(transcription) =
+                                    parsed_json.get("transcription").and_then(|t| t.as_array())
+                                {
                                     for item in transcription {
-                                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                                        if let Some(text) =
+                                            item.get("text").and_then(|t| t.as_str())
+                                        {
                                             full_text.push_str(text);
                                         }
                                     }
                                 }
-                                
+
                                 let final_result = serde_json::json!({
                                     "text": full_text.trim()
                                 });
-                                
-                                if let Ok(result_string) = serde_json::to_string(&final_result) {
-                                    if fs::write(&result_json_path, result_string.clone()).await.is_ok() {
-                                        info!("Transcription complete. Saved to {}", result_json_path);
 
-                                        let cache_path = format!("/tmp/transcribe/cache_{}.json", task.file_hash);
-                                        if let Err(e) = fs::write(&cache_path, result_string).await {
+                                if let Ok(result_string) = serde_json::to_string(&final_result) {
+                                    if fs::write(&result_json_path, result_string.clone())
+                                        .await
+                                        .is_ok()
+                                    {
+                                        info!(
+                                            "Transcription complete. Saved to {}",
+                                            result_json_path
+                                        );
+
+                                        let cache_path = format!(
+                                            "/tmp/transcribe/cache_{}.json",
+                                            task.file_hash
+                                        );
+                                        if let Err(e) = fs::write(&cache_path, result_string).await
+                                        {
                                             warn!(
                                                 error = %e,
                                                 hash = %task.file_hash,
@@ -120,18 +140,30 @@ impl AsyncConsumer for TranscriptionConsumer {
                                             info!("Cached result saved to {}", cache_path);
                                         }
                                     } else {
-                                        error!("Failed to save final JSON for task {}", task.task_id);
+                                        error!(
+                                            "Failed to save final JSON for task {}",
+                                            task.task_id
+                                        );
                                     }
                                 } else {
-                                    error!("Failed to serialize final JSON for task {}", task.task_id);
+                                    error!(
+                                        "Failed to serialize final JSON for task {}",
+                                        task.task_id
+                                    );
                                 }
                             } else {
-                                error!("Failed to parse whisper output JSON for task {}", task.task_id);
+                                error!(
+                                    "Failed to parse whisper output JSON for task {}",
+                                    task.task_id
+                                );
                             }
                         } else {
-                            error!("Failed to read whisper output JSON for task {}", task.task_id);
+                            error!(
+                                "Failed to read whisper output JSON for task {}",
+                                task.task_id
+                            );
                         }
-                        
+
                         let _ = fs::remove_file(&whisper_output_json).await;
                     }
                     _ => error!("Whisper failed for task {}", task.task_id),
@@ -143,7 +175,10 @@ impl AsyncConsumer for TranscriptionConsumer {
         let _ = fs::remove_file(&task.file_path).await;
         let _ = fs::remove_file(&wav_path).await;
 
-        match channel.basic_ack(BasicAckArguments::new(delivery_tag, false)).await {
+        match channel
+            .basic_ack(BasicAckArguments::new(delivery_tag, false))
+            .await
+        {
             Ok(_) => info!("Acked task {}", task.task_id),
             Err(e) => error!("Failed to ack task {}: {}", task.task_id, e),
         }
@@ -162,11 +197,14 @@ async fn main() {
     let rabbitmq_host = std::env::var("RABBITMQ_HOST").unwrap_or_else(|_| "localhost".to_string());
     let rabbitmq_user = std::env::var("RABBITMQ_USER").unwrap_or_else(|_| "guest".to_string());
     let rabbitmq_pass = std::env::var("RABBITMQ_PASS").unwrap_or_else(|_| "guest".to_string());
-    
+
     let connection = loop {
         match amqprs::connection::Connection::open(
             &amqprs::connection::OpenConnectionArguments::new(
-                &rabbitmq_host, 5672, &rabbitmq_user, &rabbitmq_pass,
+                &rabbitmq_host,
+                5672,
+                &rabbitmq_user,
+                &rabbitmq_pass,
             ),
         )
         .await
@@ -185,7 +223,9 @@ async fn main() {
         .expect("Failed to open RabbitMQ channel");
 
     channel
-        .queue_declare(amqprs::channel::QueueDeclareArguments::new("transcribe.task"))
+        .queue_declare(amqprs::channel::QueueDeclareArguments::new(
+            "transcribe.task",
+        ))
         .await
         .expect("Failed to declare queue");
 

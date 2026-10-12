@@ -5,9 +5,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use shared::{TranscriptionResponse, TranscriptionTask};
 use serde::Deserialize;
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
+use shared::{TranscriptionResponse, TranscriptionTask};
 use std::path::Path;
 use tokio::io::AsyncWriteExt;
 use tower_http::trace::TraceLayer;
@@ -54,9 +54,8 @@ impl RabbitMQPublisher {
             "Publishing task to RabbitMQ"
         );
 
-        let json_payload = serde_json::to_vec(task).map_err(|e| {
-            TranscribeError::RabbitMQ(format!("JSON serialization failed: {}", e))
-        })?;
+        let json_payload = serde_json::to_vec(task)
+            .map_err(|e| TranscribeError::RabbitMQ(format!("JSON serialization failed: {}", e)))?;
 
         let mut props = amqprs::BasicProperties::default();
         props.with_delivery_mode(2);
@@ -106,9 +105,7 @@ impl FileStorage {
     async fn ensure_tmp_dir(&self) -> Result<(), TranscribeError> {
         tokio::fs::create_dir_all(&self.tmp_dir)
             .await
-            .map_err(|e| {
-                TranscribeError::FileOperation(format!("Cannot create tmp dir: {}", e))
-            })?;
+            .map_err(|e| TranscribeError::FileOperation(format!("Cannot create tmp dir: {}", e)))?;
         Ok(())
     }
 
@@ -145,17 +142,19 @@ impl FileStorage {
         file_path: &str,
         mut multipart_field: axum::extract::multipart::Field<'_>,
     ) -> Result<(u64, String), TranscribeError> {
-        let file = tokio::fs::File::create(file_path).await.map_err(|e| {
-            TranscribeError::FileOperation(format!("Cannot create file: {}", e))
-        })?;
+        let file = tokio::fs::File::create(file_path)
+            .await
+            .map_err(|e| TranscribeError::FileOperation(format!("Cannot create file: {}", e)))?;
         let mut file = tokio::io::BufWriter::new(file);
 
         let mut hasher = Sha256::new();
         let mut total_bytes = 0u64;
 
-        while let Some(chunk) = multipart_field.chunk().await.map_err(|e| {
-            TranscribeError::FileOperation(format!("Failed to read chunk: {}", e))
-        })? {
+        while let Some(chunk) = multipart_field
+            .chunk()
+            .await
+            .map_err(|e| TranscribeError::FileOperation(format!("Failed to read chunk: {}", e)))?
+        {
             let chunk_size = chunk.len() as u64;
 
             if total_bytes + chunk_size > self.max_file_size {
@@ -180,9 +179,9 @@ impl FileStorage {
         })?;
 
         let file = file.into_inner();
-        file.sync_all().await.map_err(|e| {
-            TranscribeError::FileOperation(format!("Failed to sync file: {}", e))
-        })?;
+        file.sync_all()
+            .await
+            .map_err(|e| TranscribeError::FileOperation(format!("Failed to sync file: {}", e)))?;
 
         let hash_bytes = hasher.finalize();
         let file_hash = hex::encode(hash_bytes);
@@ -211,7 +210,6 @@ struct AppState {
     rabbitmq: RabbitMQPublisher,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct TranscribeQuery {
     chat_id: String,
@@ -228,9 +226,11 @@ async fn handle_transcribe(
 
     storage.ensure_tmp_dir().await?;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        TranscribeError::FileOperation(format!("Multipart parsing failed: {}", e))
-    })? {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| TranscribeError::FileOperation(format!("Multipart parsing failed: {}", e)))?
+    {
         let field_name = field.name().unwrap_or("file").to_string();
 
         if field_name != "file" {
@@ -256,7 +256,10 @@ async fn handle_transcribe(
 
         let file_path = storage.generate_file_path(&original_filename)?;
 
-        return match storage.save_file_streaming_with_hash(&file_path, field).await {
+        return match storage
+            .save_file_streaming_with_hash(&file_path, field)
+            .await
+        {
             Ok((file_size, file_hash)) => {
                 info!(
                     file_path = %file_path,
@@ -268,14 +271,16 @@ async fn handle_transcribe(
                 let cached_result_path = format!("{}/cache_{}.json", storage.tmp_dir, file_hash);
                 if tokio::fs::metadata(&cached_result_path).await.is_ok() {
                     match tokio::fs::read_to_string(&cached_result_path).await {
-                        Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
+                        Ok(content)
+                            if serde_json::from_str::<serde_json::Value>(&content).is_ok() =>
+                        {
                             info!(file_hash = %file_hash, "Cache hit! Returning cached result");
-                            
+
                             let _ = storage.delete_file(&file_path).await;
-                            
+
                             let task_id = Uuid::new_v4().to_string();
                             let result_path = format!("{}/{}.json", storage.tmp_dir, task_id);
-                            
+
                             match tokio::fs::copy(&cached_result_path, &result_path).await {
                                 Ok(_) => {
                                     return Ok(Json(TranscriptionResponse {
@@ -307,13 +312,11 @@ async fn handle_transcribe(
                 };
 
                 match rabbitmq.publish_task(&task).await {
-                    Ok(_) => {
-                        Ok(Json(TranscriptionResponse {
-                            task_id: task.task_id,
-                            status: "queued".to_string(),
-                            file_path,
-                        }))
-                    }
+                    Ok(_) => Ok(Json(TranscriptionResponse {
+                        task_id: task.task_id,
+                        status: "queued".to_string(),
+                        file_path,
+                    })),
                     Err(e) => {
                         let _ = storage.delete_file(&file_path).await;
                         Err(e)
@@ -324,12 +327,10 @@ async fn handle_transcribe(
                 let _ = storage.delete_file(&file_path).await;
                 Err(e)
             }
-        }
+        };
     }
 
-    Err(TranscribeError::Validation(
-        "No file uploaded".to_string(),
-    ))
+    Err(TranscribeError::Validation("No file uploaded".to_string()))
 }
 
 /// Healthcheck
@@ -351,22 +352,18 @@ async fn get_result(
     let result_path = format!("{}/{}.json", state.storage.tmp_dir, task_id);
 
     match tokio::fs::read_to_string(&result_path).await {
-        Ok(json_content) => {
-            match serde_json::from_str::<serde_json::Value>(&json_content) {
-                Ok(json) => Json(json).into_response(),
-                Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Invalid JSON result").into_response(),
-            }
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "task_id": task_id,
-                    "status": "processing"
-                })),
-            )
-                .into_response()
-        }
+        Ok(json_content) => match serde_json::from_str::<serde_json::Value>(&json_content) {
+            Ok(json) => Json(json).into_response(),
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Invalid JSON result").into_response(),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "task_id": task_id,
+                "status": "processing"
+            })),
+        )
+            .into_response(),
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Error reading result").into_response(),
     }
 }
@@ -375,28 +372,25 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 10)); // Каждые 10 минут
     loop {
         interval.tick().await;
-        
+
         let mut deleted_results = 0;
         let mut deleted_cache = 0;
-        
+
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 if let Ok(metadata) = entry.metadata().await {
                     if let Ok(modified) = metadata.modified() {
                         if let Ok(elapsed) = modified.elapsed() {
                             let path = entry.path();
-                            let filename = path.file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("");
-                            
+                            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
                             if filename.starts_with("cache_") && filename.ends_with(".json") {
                                 if elapsed.as_secs() > cache_max_age_secs {
                                     if tokio::fs::remove_file(&path).await.is_ok() {
                                         deleted_cache += 1;
                                     }
                                 }
-                            }
-                            else if filename.ends_with(".json") {
+                            } else if filename.ends_with(".json") {
                                 if elapsed.as_secs() > result_max_age_secs {
                                     if tokio::fs::remove_file(&path).await.is_ok() {
                                         deleted_results += 1;
@@ -408,7 +402,7 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
                 }
             }
         }
-        
+
         if deleted_results > 0 || deleted_cache > 0 {
             info!(
                 deleted_results = deleted_results,
@@ -432,13 +426,15 @@ async fn main() {
     let rabbitmq_host = std::env::var("RABBITMQ_HOST").unwrap_or_else(|_| "localhost".to_string());
     let rabbitmq_user = std::env::var("RABBITMQ_USER").unwrap_or_else(|_| "guest".to_string());
     let rabbitmq_pass = std::env::var("RABBITMQ_PASS").unwrap_or_else(|_| "guest".to_string());
-    let connection = amqprs::connection::Connection::open(
-        &amqprs::connection::OpenConnectionArguments::new(
-            &rabbitmq_host, 5672, &rabbitmq_user, &rabbitmq_pass,
-        ),
-    )
-    .await
-    .expect("Failed to connect to RabbitMQ");
+    let connection =
+        amqprs::connection::Connection::open(&amqprs::connection::OpenConnectionArguments::new(
+            &rabbitmq_host,
+            5672,
+            &rabbitmq_user,
+            &rabbitmq_pass,
+        ))
+        .await
+        .expect("Failed to connect to RabbitMQ");
 
     let channel = connection
         .open_channel(None)
@@ -457,8 +453,7 @@ async fn main() {
         .route("/result/{task_id}", get(get_result))
         .route(
             "/transcribe",
-            post(handle_transcribe)
-                .layer(DefaultBodyLimit::max(500 * 1024 * 1024)),
+            post(handle_transcribe).layer(DefaultBodyLimit::max(500 * 1024 * 1024)),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http());
@@ -470,7 +465,10 @@ async fn main() {
         .unwrap_or_else(|_| panic!("Failed to bind to {}", bind_addr));
 
     info!("Server running on http://{}:3000", listen_host);
-    info!("Transcribe endpoint: POST http://{}:3000/transcribe", listen_host);
+    info!(
+        "Transcribe endpoint: POST http://{}:3000/transcribe",
+        listen_host
+    );
 
     axum::serve(listener, app).await.expect("Server error");
 }
