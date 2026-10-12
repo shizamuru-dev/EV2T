@@ -53,10 +53,10 @@ impl AsyncConsumer for TranscriptionConsumer {
         let wav_path = format!("/tmp/transcribe/{}.wav", task.task_id);
         let result_json_path = format!("/tmp/transcribe/{}.json", task.task_id);
 
-        // 1. Конвертация аудио через ffmpeg (16kHz, mono) - требование whisper.cpp
+        // ffmpeg convert (16kHz, mono) for whisper.cpp
         info!("Converting {} to 16kHz WAV...", task.file_path);
         let ffmpeg_status = Command::new("ffmpeg")
-            .arg("-y") // перезаписывать если есть
+            .arg("-y")
             .arg("-i")
             .arg(&task.file_path)
             .arg("-ar")
@@ -73,14 +73,12 @@ impl AsyncConsumer for TranscriptionConsumer {
             Ok(status) if status.success() => {
                 info!("Converted to WAV successfully.");
                 
-                // 2. Запуск whisper-cli
                 info!("Running whisper.cpp on {}...", wav_path);
-                // whisper-cli с флагом -oj сгенерирует файл wav_path + ".json"
                 let whisper_status = Command::new("whisper-cli")
                     .arg("-m")
-                    .arg("/models/ggml-small.bin") // используем small модель
+                    .arg("/models/ggml-small.bin") // using small model
                     .arg("-l")
-                    .arg("auto") // автоопределение языка
+                    .arg("auto")
                     .arg("-f")
                     .arg(&wav_path)
                     .arg("-oj") // output json
@@ -91,7 +89,6 @@ impl AsyncConsumer for TranscriptionConsumer {
                     Ok(status) if status.success() => {
                         let whisper_output_json = format!("{}.json", wav_path);
                         
-                        // Читаем сгенерированный JSON, извлекаем только текст и сохраняем
                         if let Ok(file_content) = fs::read_to_string(&whisper_output_json).await {
                             if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&file_content) {
                                 let mut full_text = String::new();
@@ -110,8 +107,7 @@ impl AsyncConsumer for TranscriptionConsumer {
                                 if let Ok(result_string) = serde_json::to_string(&final_result) {
                                     if fs::write(&result_json_path, result_string.clone()).await.is_ok() {
                                         info!("Transcription complete. Saved to {}", result_json_path);
-                                        
-                                        // Сохраняем также кешированную версию по хешу файла
+
                                         let cache_path = format!("/tmp/transcribe/cache_{}.json", task.file_hash);
                                         if let Err(e) = fs::write(&cache_path, result_string).await {
                                             warn!(
@@ -144,11 +140,9 @@ impl AsyncConsumer for TranscriptionConsumer {
             _ => error!("FFmpeg failed to convert {}", task.file_path),
         }
 
-        // Очищаем временные файлы
         let _ = fs::remove_file(&task.file_path).await;
         let _ = fs::remove_file(&wav_path).await;
 
-        // Подтверждаем RabbitMQ
         match channel.basic_ack(BasicAckArguments::new(delivery_tag, false)).await {
             Ok(_) => info!("Acked task {}", task.task_id),
             Err(e) => error!("Failed to ack task {}: {}", task.task_id, e),
@@ -169,7 +163,6 @@ async fn main() {
     let rabbitmq_user = std::env::var("RABBITMQ_USER").unwrap_or_else(|_| "guest".to_string());
     let rabbitmq_pass = std::env::var("RABBITMQ_PASS").unwrap_or_else(|_| "guest".to_string());
     
-    // Подключаемся к RabbitMQ (пытаемся до победного)
     let connection = loop {
         match amqprs::connection::Connection::open(
             &amqprs::connection::OpenConnectionArguments::new(
@@ -191,13 +184,11 @@ async fn main() {
         .await
         .expect("Failed to open RabbitMQ channel");
 
-    // Создаем очередь если её нет
     channel
         .queue_declare(amqprs::channel::QueueDeclareArguments::new("transcribe.task"))
         .await
         .expect("Failed to declare queue");
 
-    // Создаем обменник (exchange), если его нет
     channel
         .exchange_declare(amqprs::channel::ExchangeDeclareArguments::new(
             "transcribe",
@@ -206,7 +197,6 @@ async fn main() {
         .await
         .unwrap_or_default();
 
-    // Биндим
     channel
         .queue_bind(amqprs::channel::QueueBindArguments::new(
             "transcribe.task",
@@ -218,9 +208,6 @@ async fn main() {
 
     let consumer = TranscriptionConsumer::new(channel.clone());
 
-    // Устанавливаем QoS: prefetch_count = 1
-    // Это гарантирует, что RabbitMQ будет выдавать воркеру только 1 задачу за раз.
-    // Следующая задача придет только после того, как текущая получит ack.
     channel
         .basic_qos(amqprs::channel::BasicQosArguments::new(0, 1, false))
         .await
@@ -236,7 +223,6 @@ async fn main() {
         .await
         .expect("Failed to consume");
 
-    // Блокируем главный поток, чтобы программа не завершилась
     tokio::signal::ctrl_c().await.unwrap();
     info!("Shutting down worker...");
 }

@@ -2,19 +2,12 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriptionTask {
-    /// Уникальный ID задачи
     pub task_id: String,
-    /// Полный путь до файла на сервере
     pub file_path: String,
-    /// ID чата в Telegram
     pub chat_id: String,
-    /// ID сообщения в Telegram (для редактирования)
     pub message_id: Option<String>,
-    /// Имя файла (для логирования)
     pub filename: String,
-    /// Таймстамп создания
     pub created_at: i64,
-    /// SHA256 хеш файла для кеширования
     pub file_hash: String,
 }
 

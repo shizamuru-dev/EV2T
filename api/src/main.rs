@@ -13,11 +13,6 @@ use tokio::io::AsyncWriteExt;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 use uuid::Uuid;
-
-// ============================================================================
-// ТИПЫ ОШИБОК
-// ============================================================================
-
 #[derive(Debug)]
 enum TranscribeError {
     FileOperation(String),
@@ -41,16 +36,6 @@ impl IntoResponse for TranscribeError {
     }
 }
 
-// ============================================================================
-// СТРУКТУРЫ ДЛЯ RABITMQ
-// ============================================================================
-
-// Убрали TranscriptionTask и TranscriptionResponse, они теперь в shared
-
-// ============================================================================
-// RABITMQ ПУБЛИШЕР
-// ============================================================================
-
 #[derive(Clone)]
 struct RabbitMQPublisher {
     channel: amqprs::channel::Channel,
@@ -69,7 +54,6 @@ impl RabbitMQPublisher {
             "Publishing task to RabbitMQ"
         );
 
-        // Преобразуем задачу в JSON
         let json_payload = serde_json::to_vec(task).map_err(|e| {
             TranscribeError::RabbitMQ(format!("JSON serialization failed: {}", e))
         })?;
@@ -77,7 +61,6 @@ impl RabbitMQPublisher {
         let mut props = amqprs::BasicProperties::default();
         props.with_delivery_mode(2);
 
-        // Объявляем обменник перед отправкой (на случай если воркер еще не поднялся)
         self.channel
             .exchange_declare(amqprs::channel::ExchangeDeclareArguments::new(
                 "transcribe",
@@ -106,10 +89,6 @@ impl RabbitMQPublisher {
     }
 }
 
-// ============================================================================
-// ХРАНИЛИЩЕ ФАЙЛОВ
-// ============================================================================
-
 #[derive(Clone)]
 struct FileStorage {
     tmp_dir: String,
@@ -124,7 +103,6 @@ impl FileStorage {
         }
     }
 
-    /// Проверяет и создаёт временную директорию
     async fn ensure_tmp_dir(&self) -> Result<(), TranscribeError> {
         tokio::fs::create_dir_all(&self.tmp_dir)
             .await
@@ -134,7 +112,6 @@ impl FileStorage {
         Ok(())
     }
 
-    /// Генерирует безопасный путь до файла
     fn generate_file_path(&self, original_filename: &str) -> Result<String, TranscribeError> {
         // Валидация имени файла
         if original_filename.is_empty() || original_filename.len() > 255 {
@@ -143,7 +120,6 @@ impl FileStorage {
             ));
         }
 
-        // Убираем опасные символы
         let safe_filename = original_filename
             .chars()
             .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
@@ -155,7 +131,6 @@ impl FileStorage {
             ));
         }
 
-        // Генерируем уникальное имя: UUID + исходное расширение
         let ext = Path::new(&safe_filename)
             .extension()
             .and_then(|e| e.to_str())
@@ -165,7 +140,6 @@ impl FileStorage {
         Ok(format!("{}/{}", self.tmp_dir, unique_filename))
     }
 
-    /// Сохраняет файл потоком (streaming) и одновременно вычисляет SHA256 хеш
     async fn save_file_streaming_with_hash(
         &self,
         file_path: &str,
@@ -179,15 +153,12 @@ impl FileStorage {
         let mut hasher = Sha256::new();
         let mut total_bytes = 0u64;
 
-        // Потоковое чтение, запись чанков и вычисление хеша одновременно
         while let Some(chunk) = multipart_field.chunk().await.map_err(|e| {
             TranscribeError::FileOperation(format!("Failed to read chunk: {}", e))
         })? {
             let chunk_size = chunk.len() as u64;
 
-            // Проверка максимального размера файла
             if total_bytes + chunk_size > self.max_file_size {
-                // Удаляем недописанный файл
                 let _ = tokio::fs::remove_file(file_path).await;
                 return Err(TranscribeError::Validation(format!(
                     "File size exceeds limit of {} MB",
@@ -195,10 +166,8 @@ impl FileStorage {
                 )));
             }
 
-            // Обновляем хеш
             hasher.update(&chunk);
 
-            // Записываем в файл
             file.write_all(&chunk).await.map_err(|e| {
                 TranscribeError::FileOperation(format!("Failed to write chunk: {}", e))
             })?;
@@ -206,18 +175,15 @@ impl FileStorage {
             total_bytes += chunk_size;
         }
 
-        // Сбрасываем буфер
         file.flush().await.map_err(|e| {
             TranscribeError::FileOperation(format!("Failed to flush buffer: {}", e))
         })?;
 
-        // Получаем оригинальный файл и синхронизируем на диск
         let file = file.into_inner();
         file.sync_all().await.map_err(|e| {
             TranscribeError::FileOperation(format!("Failed to sync file: {}", e))
         })?;
 
-        // Вычисляем финальный хеш
         let hash_bytes = hasher.finalize();
         let file_hash = hex::encode(hash_bytes);
 
@@ -231,7 +197,6 @@ impl FileStorage {
         Ok((total_bytes, file_hash))
     }
 
-    /// Удаляет файл (для rollback при ошибке)
     async fn delete_file(&self, file_path: &str) -> Result<(), TranscribeError> {
         tokio::fs::remove_file(file_path).await.map_err(|e| {
             warn!(file_path = %file_path, error = %e, "Failed to delete file");
@@ -240,19 +205,12 @@ impl FileStorage {
     }
 }
 
-// ============================================================================
-// ПРИЛОЖЕНИЕ
-// ============================================================================
-
 #[derive(Clone)]
 struct AppState {
     storage: FileStorage,
     rabbitmq: RabbitMQPublisher,
 }
 
-// ============================================================================
-// ОБРАБОТЧИКИ
-// ============================================================================
 
 #[derive(Debug, Deserialize)]
 struct TranscribeQuery {
@@ -260,26 +218,21 @@ struct TranscribeQuery {
     message_id: Option<String>,
 }
 
-/// Обработчик для загрузки файла
 async fn handle_transcribe(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Query(query_params): axum::extract::Query<TranscribeQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<TranscriptionResponse>, TranscribeError> {
-    // Используем хранилище и RabbitMQ из состояния
     let storage = &state.storage;
     let rabbitmq = &state.rabbitmq;
 
-    // Создаём временную директорию
     storage.ensure_tmp_dir().await?;
 
-    // Обрабатываем multipart форму
     while let Some(field) = multipart.next_field().await.map_err(|e| {
         TranscribeError::FileOperation(format!("Multipart parsing failed: {}", e))
     })? {
         let field_name = field.name().unwrap_or("file").to_string();
 
-        // Обрабатываем только поле "file"
         if field_name != "file" {
             warn!(field_name = %field_name, "Skipping non-file field");
             continue;
@@ -290,7 +243,6 @@ async fn handle_transcribe(
             .map(|s| s.to_string())
             .unwrap_or_else(|| "audio.ogg".to_string());
 
-        // Проверяем расширение файла
         let ext = Path::new(&original_filename)
             .extension()
             .and_then(|e| e.to_str())
@@ -302,10 +254,8 @@ async fn handle_transcribe(
             ));
         }
 
-        // Генерируем безопасный путь
         let file_path = storage.generate_file_path(&original_filename)?;
 
-        // Сохраняем файл потоком и сразу вычисляем хеш
         return match storage.save_file_streaming_with_hash(&file_path, field).await {
             Ok((file_size, file_hash)) => {
                 info!(
@@ -315,18 +265,14 @@ async fn handle_transcribe(
                     "File saved and hashed"
                 );
 
-                // Проверяем, есть ли уже результат с этим хешем
                 let cached_result_path = format!("{}/cache_{}.json", storage.tmp_dir, file_hash);
                 if tokio::fs::metadata(&cached_result_path).await.is_ok() {
-                    // Валидируем кешированный файл
                     match tokio::fs::read_to_string(&cached_result_path).await {
                         Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
                             info!(file_hash = %file_hash, "Cache hit! Returning cached result");
                             
-                            // Удаляем загруженный файл, он нам не нужен
                             let _ = storage.delete_file(&file_path).await;
                             
-                            // Копируем кешированный результат под новый task_id
                             let task_id = Uuid::new_v4().to_string();
                             let result_path = format!("{}/{}.json", storage.tmp_dir, task_id);
                             
@@ -350,7 +296,6 @@ async fn handle_transcribe(
                     }
                 }
 
-                // Создаём задачу для воркера
                 let task = TranscriptionTask {
                     task_id: Uuid::new_v4().to_string(),
                     file_path: file_path.clone(),
@@ -361,7 +306,6 @@ async fn handle_transcribe(
                     file_hash,
                 };
 
-                // Отправляем в RabbitMQ
                 match rabbitmq.publish_task(&task).await {
                     Ok(_) => {
                         Ok(Json(TranscriptionResponse {
@@ -371,14 +315,12 @@ async fn handle_transcribe(
                         }))
                     }
                     Err(e) => {
-                        // Если не смогли отправить в RabbitMQ, удаляем файл
                         let _ = storage.delete_file(&file_path).await;
                         Err(e)
                     }
                 }
             }
             Err(e) => {
-                // При ошибке сохранения удаляем файл если он создан
                 let _ = storage.delete_file(&file_path).await;
                 Err(e)
             }
@@ -390,7 +332,7 @@ async fn handle_transcribe(
     ))
 }
 
-/// Healthcheck эндпоинт
+/// Healthcheck
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
@@ -398,7 +340,6 @@ async fn health() -> Json<serde_json::Value> {
     }))
 }
 
-/// Обработчик для получения результата транскрибации
 async fn get_result(
     axum::extract::Path(task_id): axum::extract::Path<String>,
     axum::extract::State(state): axum::extract::State<AppState>,
@@ -417,7 +358,6 @@ async fn get_result(
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Файла с результатом еще нет — задача в очереди или обрабатывается воркером
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -431,11 +371,6 @@ async fn get_result(
     }
 }
 
-// ============================================================================
-// MAIN
-// ============================================================================
-
-/// Фоновая задача для удаления старых файлов результатов и кеша
 async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs: u64) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 10)); // Каждые 10 минут
     loop {
@@ -454,7 +389,6 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("");
                             
-                            // Кеш-файлы (cache_*.json) удаляются через cache_max_age_secs
                             if filename.starts_with("cache_") && filename.ends_with(".json") {
                                 if elapsed.as_secs() > cache_max_age_secs {
                                     if tokio::fs::remove_file(&path).await.is_ok() {
@@ -462,7 +396,6 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
                                     }
                                 }
                             }
-                            // Обычные результаты (UUID.json) удаляются через result_max_age_secs
                             else if filename.ends_with(".json") {
                                 if elapsed.as_secs() > result_max_age_secs {
                                     if tokio::fs::remove_file(&path).await.is_ok() {
@@ -488,7 +421,6 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
 
 #[tokio::main]
 async fn main() {
-    // Инициализируем логирование
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .compact()
@@ -518,25 +450,19 @@ async fn main() {
         rabbitmq: RabbitMQPublisher::new(channel),
     };
 
-    // Запускаем фоновую задачу по очистке старых файлов
-    // Результаты (UUID.json) удаляются через 1 час (3600 сек)
-    // Кеш-файлы (cache_*.json) удаляются через 7 дней (604800 сек)
     tokio::spawn(cleanup_task("/tmp/transcribe".to_string(), 3600, 604800));
 
-    // Создаём роутер
     let app = Router::new()
         .route("/health", get(health))
         .route("/result/{task_id}", get(get_result))
         .route(
             "/transcribe",
             post(handle_transcribe)
-                // Лимит на размер тела запроса (500 MB)
                 .layer(DefaultBodyLimit::max(500 * 1024 * 1024)),
         )
         .with_state(state)
         .layer(TraceLayer::new_for_http());
 
-    // Запускаем сервер
     let listen_host = std::env::var("HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let bind_addr = format!("{}:3000", listen_host);
     let listener = tokio::net::TcpListener::bind(&bind_addr)

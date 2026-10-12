@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   api:
     build: .
@@ -26,7 +24,6 @@ services:
       - RABBITMQ_USER=${RABBITMQ_USER:-guest}
       - RABBITMQ_PASS=${RABBITMQ_PASS:-guest}
     volumes:
-      # Важно: монтируем ту же самую директорию, чтобы воркер видел файлы, сохраненные API
       - transcribe_data:/tmp/transcribe
     depends_on:
       rabbitmq:
@@ -37,7 +34,7 @@ services:
     image: rabbitmq:3-management
     ports:
       - "5672:5672"
-      - "15672:15672" # Админка (по умолчанию guest/guest)
+      - "127.0.0.1:15672:15672" # Admin panel
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
