@@ -1,0 +1,42 @@
+# ЧАСТЬ 1: Сам процесс RabbitMQ
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rabbitmq
+spec:
+  replicas: 1                    # Ровно одна копия
+  selector:
+    matchLabels:
+      app: rabbitmq              # Следить за подами с меткой app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq            # Вешаем эту метку на создаваемый под
+    spec:
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3-management
+          ports:
+            - containerPort: 5672       # Порт протокола AMQP
+            - containerPort: 15672      # Веб-панель RabbitMQ
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              value: "guest"
+            - name: RABBITMQ_DEFAULT_PASS
+              value: "guest"
+---
+# ЧАСТЬ 2: Постоянный адрес для других подов
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq                 # Стабильное имя в DNS кластера! (как в Docker Compose)
+spec:
+  selector:
+    app: rabbitmq                # Пересылать запросы на поды с меткой app: rabbitmq
+  ports:
+    - name: amqp
+      port: 5672                 # Внешний порт сервиса
+      targetPort: 5672           # Порт внутри контейнера
+    - name: management
+      port: 15672
+      targetPort: 15672

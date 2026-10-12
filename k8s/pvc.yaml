@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: transcribe-pvc           # Имя диска, на которое будем ссылаться
+spec:
+  accessModes:
+    - ReadWriteOnce              # Можно читать и писать нескольким подам одновременно
+  resources:
+    requests:
+      storage: 2Gi               # Размер диска (2 гигабайта)

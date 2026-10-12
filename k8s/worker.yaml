@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 1                    # Количество воркеров (потом можно скейлить хоть до 10)
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: ev2t:latest
+          imagePullPolicy: IfNotPresent  # Брать локальный образ, не лезть в Docker Hub
+          command: ["worker"]            # Команда запуска из docker-compose
+          env:
+            - name: RABBITMQ_HOST
+              value: "rabbitmq"          # Стучится в Service rabbitmq из шага 2
+            - name: RABBITMQ_USER
+              value: "guest"
+            - name: RABBITMQ_PASS
+              value: "guest"
+          volumeMounts:
+            - name: transcribe-storage
+              mountPath: /tmp/transcribe # Куда монтировать диск внутри контейнера
+      volumes:
+        - name: transcribe-storage
+          persistentVolumeClaim:
+            claimName: transcribe-pvc    # Подключаем ту самую флешку из шага 1

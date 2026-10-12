@@ -1,0 +1,50 @@
+# ЧАСТЬ 1: Два инстанса API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+spec:
+  replicas: 2                    # 2 копии для отказоустойчивости
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: ev2t:latest
+          imagePullPolicy: IfNotPresent
+          command: ["api"]
+          ports:
+            - containerPort: 3000
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: RABBITMQ_HOST
+              value: "rabbitmq"
+            - name: RABBITMQ_USER
+              value: "guest"
+            - name: RABBITMQ_PASS
+              value: "guest"
+          volumeMounts:
+            - name: transcribe-storage
+              mountPath: /tmp/transcribe
+      volumes:
+        - name: transcribe-storage
+          persistentVolumeClaim:
+            claimName: transcribe-pvc
+---
+# ЧАСТЬ 2: Балансировщик трафика между двумя копиями API
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-service
+spec:
+  selector:
+    app: api                     # Балансирует входящий трафик между двумя подами API
+  ports:
+    - port: 3000
+      targetPort: 3000
