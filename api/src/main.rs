@@ -378,26 +378,24 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
 
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(metadata) = entry.metadata().await {
-                    if let Ok(modified) = metadata.modified() {
-                        if let Ok(elapsed) = modified.elapsed() {
-                            let path = entry.path();
-                            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if let Ok(metadata) = entry.metadata().await
+                    && let Ok(modified) = metadata.modified()
+                    && let Ok(elapsed) = modified.elapsed()
+                {
+                    let path = entry.path();
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                            if filename.starts_with("cache_") && filename.ends_with(".json") {
-                                if elapsed.as_secs() > cache_max_age_secs {
-                                    if tokio::fs::remove_file(&path).await.is_ok() {
-                                        deleted_cache += 1;
-                                    }
-                                }
-                            } else if filename.ends_with(".json") {
-                                if elapsed.as_secs() > result_max_age_secs {
-                                    if tokio::fs::remove_file(&path).await.is_ok() {
-                                        deleted_results += 1;
-                                    }
-                                }
-                            }
+                    if filename.starts_with("cache_") && filename.ends_with(".json") {
+                        if elapsed.as_secs() > cache_max_age_secs
+                            && tokio::fs::remove_file(&path).await.is_ok()
+                        {
+                            deleted_cache += 1;
                         }
+                    } else if filename.ends_with(".json")
+                        && elapsed.as_secs() > result_max_age_secs
+                        && tokio::fs::remove_file(&path).await.is_ok()
+                    {
+                        deleted_results += 1;
                     }
                 }
             }
