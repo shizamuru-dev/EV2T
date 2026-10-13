@@ -378,10 +378,13 @@ async fn cleanup_task(dir: String, result_max_age_secs: u64, cache_max_age_secs:
 
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
             while let Ok(Some(entry)) = entries.next_entry().await {
-                if let Ok(metadata) = entry.metadata().await
-                    && let Ok(modified) = metadata.modified()
-                    && let Ok(elapsed) = modified.elapsed()
-                {
+                let elapsed = match entry.metadata().await {
+                    Ok(metadata) => metadata.modified().and_then(|modified| modified.elapsed().map_err(|_| {
+                        std::io::Error::other("file modification time is in the future")
+                    })),
+                    Err(error) => Err(error),
+                };
+                if let Ok(elapsed) = elapsed {
                     let path = entry.path();
                     let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
